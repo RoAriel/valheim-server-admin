@@ -243,6 +243,33 @@ cmd_backups_list() {
         size=$(du -h "$f" | cut -f1)
         echo "$(basename "$f")  —  ${size}"
     done
+    echo "---"
+    echo "Espacio total ocupado: $(du -sh "$BACKUP_DIR" | cut -f1)"
+}
+
+cmd_help() {
+    cat <<'EOF'
+vhctl — administración del servidor Valheim
+
+Uso: vhctl <comando> [argumentos]
+
+Comandos generales:
+  on                                 Enciende el servidor
+  off                                Apaga el servidor (con backup automático)
+  reset                              Reinicia el servidor (con backup automático)
+  status                             Estado del servicio y mundo activo
+  backup                             Backup manual del mundo activo
+  backups                            Lista los backups guardados (nombre, tamaño y total)
+  update                             Consulta y aplica actualizaciones del juego
+  password <nueva_contraseña>        Cambia la contraseña del mundo
+  help                                Muestra esta ayuda
+
+Comandos de mundos:
+  worlds list                        Lista los mundos disponibles
+  worlds create <nombre>             Crea un mundo nuevo
+  worlds switch <nombre>             Cambia el mundo activo (con backup previo)
+  worlds delete <nombre> --confirm   Borra un mundo (no permite borrar el activo)
+EOF
 }
 
 cmd_password() {
@@ -293,6 +320,7 @@ case "${1:-}" in
     backups) cmd_backups_list ;;
     update) cmd_update ;;
     password) cmd_password "${2:-}" ;;
+    help|--help|-h) cmd_help ;;
     worlds)
         case "${2:-}" in
             list) cmd_worlds_list ;;
@@ -303,7 +331,7 @@ case "${1:-}" in
         esac
         ;;
     *)
-        echo "Uso: vhctl {on|off|reset|status|backup|backups|update|password|worlds ...}" >&2
+        cmd_help
         exit 1
         ;;
 esac
