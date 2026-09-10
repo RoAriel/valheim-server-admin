@@ -1,0 +1,1 @@
+valheim ALL=(root) NOPASSWD: /usr/local/bin/vhctl

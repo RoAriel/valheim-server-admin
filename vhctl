@@ -1,0 +1,309 @@
+#!/bin/bash
+set -euo pipefail
+
+SERVICE_NAME="valheim"
+START_SCRIPT="/opt/valheim-server/start_valheim.sh"
+WORLD_DIR="/srv/valheim/worlds/worlds_local"
+BACKUP_DIR="/srv/valheim/worlds/vhctl_backups"
+RETENTION=5
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Este comando necesita sudo/root." >&2
+        exit 1
+    fi
+}
+
+get_world_name() {
+    grep -oP '^WORLD_NAME="\K[^"]+' "$START_SCRIPT"
+}
+
+set_world_name() {
+    local new_name="$1"
+    sed -i "s/^WORLD_NAME=\".*\"/WORLD_NAME=\"${new_name}\"/" "$START_SCRIPT"
+}
+
+world_exists() {
+    local name="$1"
+    [[ -d "${WORLD_DIR}/${name}" || -f "${WORLD_DIR}/${name}.db" ]]
+}
+
+do_backup() {
+    require_root
+    local world_name
+    world_name=$(get_world_name)
+
+    mkdir -p "$BACKUP_DIR"
+    local ts
+    ts=$(date +%Y%m%d%H%M%S)
+    local archive="${BACKUP_DIR}/vhctl_${world_name}_${ts}.tar.gz"
+
+    if [[ -d "${WORLD_DIR}/${world_name}" ]]; then
+        # Formato nuevo (carpeta, Valheim 1.0+)
+        tar -czf "$archive" -C "$WORLD_DIR" "${world_name}"
+    elif [[ -f "${WORLD_DIR}/${world_name}.db" && -f "${WORLD_DIR}/${world_name}.fwl" ]]; then
+        # Formato clásico (.db + .fwl)
+        tar -czf "$archive" -C "$WORLD_DIR" "${world_name}.db" "${world_name}.fwl"
+    else
+        echo "Aviso: no se encontraron archivos de '$world_name' en $WORLD_DIR, se omite backup."
+        return
+    fi
+
+    chown valheim:valheim "$archive"
+    echo "Backup creado: $archive"
+
+    # Rotación: conservar solo los últimos $RETENTION
+    local count
+    count=$(ls -1 "${BACKUP_DIR}"/vhctl_*.tar.gz 2>/dev/null | wc -l)
+    if (( count > RETENTION )); then
+        ls -1t "${BACKUP_DIR}"/vhctl_*.tar.gz | tail -n +$((RETENTION + 1)) | xargs -r rm -f
+        echo "Rotación: se conservan los últimos $RETENTION backups."
+    fi
+}
+
+cmd_on() {
+    require_root
+    systemctl start "$SERVICE_NAME"
+    echo "Servidor iniciado."
+}
+
+cmd_off() {
+    require_root
+    echo "Generando backup antes de apagar..."
+    do_backup
+    systemctl stop "$SERVICE_NAME"
+    echo "Servidor detenido."
+}
+
+cmd_reset() {
+    require_root
+    echo "Generando backup antes de reiniciar..."
+    do_backup
+    systemctl restart "$SERVICE_NAME"
+    echo "Servidor reiniciado."
+}
+
+cmd_status() {
+    systemctl status "$SERVICE_NAME" --no-pager -l \
+        | sed -E 's/(-password )[^[:space:]]+/\1********/' \
+        | head -n 10
+    echo "---"
+    echo "Mundo activo: $(get_world_name)"
+}
+
+cmd_worlds_list() {
+    echo "Mundos disponibles en $WORLD_DIR:"
+    {
+        find "$WORLD_DIR" -mindepth 1 -maxdepth 1 -type d ! -iname "*_backup_auto-*" -printf "%f\n" 2>/dev/null
+        find "$WORLD_DIR" -mindepth 1 -maxdepth 1 -name "*.db" ! -iname "*_backup_auto-*" -printf "%f\n" 2>/dev/null | sed 's/\.db$//'
+    } | sort -u
+    echo ""
+    echo "Mundo activo actualmente: $(get_world_name)"
+}
+
+cmd_worlds_create() {
+    require_root
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        echo "Uso: vhctl worlds create <nombre>" >&2
+        exit 1
+    fi
+    if world_exists "$name"; then
+        echo "Ya existe un mundo con ese nombre." >&2
+        exit 1
+    fi
+    set_world_name "$name"
+    echo "Mundo '$name' configurado. Se generará al iniciar el servidor."
+    echo "Ejecutá 'vhctl on' o 'vhctl reset' para crearlo."
+}
+
+cmd_worlds_switch() {
+    require_root
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        echo "Uso: vhctl worlds switch <nombre>" >&2
+        exit 1
+    fi
+    if ! world_exists "$name"; then
+        echo "No existe un mundo llamado '$name' en $WORLD_DIR." >&2
+        exit 1
+    fi
+    echo "Generando backup del mundo actual antes de cambiar..."
+    do_backup
+    set_world_name "$name"
+    systemctl restart "$SERVICE_NAME"
+    echo "Cambiado al mundo '$name' y servidor reiniciado."
+}
+
+cmd_worlds_delete() {
+    require_root
+    local name="$1"
+    local confirm="${2:-}"
+    if [[ -z "$name" ]]; then
+        echo "Uso: vhctl worlds delete <nombre> --confirm" >&2
+        exit 1
+    fi
+    if ! world_exists "$name"; then
+        echo "No existe un mundo llamado '$name' en $WORLD_DIR." >&2
+        exit 1
+    fi
+    local active_world
+    active_world=$(get_world_name)
+    if [[ "$name" == "$active_world" ]]; then
+        echo "No se puede borrar '$name': es el mundo activo. Cambiá a otro mundo primero con 'vhctl worlds switch'." >&2
+        exit 1
+    fi
+    if [[ "$confirm" != "--confirm" ]]; then
+        echo "Esto va a borrar permanentemente el mundo '${name}' (y sus backups nativos _auto)."
+        echo "Repetí el comando agregando --confirm al final para confirmar:"
+        echo "  vhctl worlds delete ${name} --confirm"
+        exit 1
+    fi
+
+    echo "Generando backup de seguridad antes de borrar..."
+    mkdir -p "$BACKUP_DIR"
+    local safety_archive="${BACKUP_DIR}/vhctl_${name}_pre-delete_$(date +%Y%m%d%H%M%S).tar.gz"
+
+    if [[ -d "${WORLD_DIR}/${name}" ]]; then
+        tar -czf "$safety_archive" -C "$WORLD_DIR" "${name}" 2>/dev/null || true
+        rm -rf "${WORLD_DIR}/${name}"
+    else
+        tar -czf "$safety_archive" -C "$WORLD_DIR" "${name}.db" "${name}.fwl" 2>/dev/null || true
+        rm -f "${WORLD_DIR}/${name}.db" "${WORLD_DIR}/${name}.fwl"
+    fi
+    rm -rf "${WORLD_DIR}/${name}_backup_auto-"* 2>/dev/null || true
+
+    echo "Mundo '$name' borrado. Se guardó un backup de seguridad en $BACKUP_DIR por si te arrepentís."
+}
+
+STEAM_APPID=896660
+INSTALL_DIR="/opt/valheim-server"
+MANIFEST_FILE="${INSTALL_DIR}/steamapps/appmanifest_${STEAM_APPID}.acf"
+PASSWORD_FILE="/etc/valheim-server.env"
+
+get_local_buildid() {
+    if [[ -f "$MANIFEST_FILE" ]]; then
+        grep -oP '"buildid"\s*"\K[0-9]+' "$MANIFEST_FILE" 2>/dev/null | head -1 || true
+    fi
+    return 0
+}
+
+get_remote_buildid() {
+    su - valheim -c "steamcmd +login anonymous +app_info_update 1 +app_info_print ${STEAM_APPID} +quit" 2>/dev/null \
+        | awk '/"public"/{f=1} f && /"buildid"/{print; exit}' \
+        | grep -oP '"buildid"\s*"\K[0-9]+' || true
+    return 0
+}
+
+cmd_update() {
+    require_root
+    echo "Consultando la última versión disponible en Steam..."
+    local local_id remote_id
+    local_id=$(get_local_buildid)
+    remote_id=$(get_remote_buildid)
+
+    if [[ -z "$remote_id" ]]; then
+        echo "No se pudo consultar la versión remota (revisá la conexión de red del VPS o que steamcmd esté funcionando)." >&2
+        exit 1
+    fi
+
+    echo "Versión instalada:  ${local_id:-desconocida}"
+    echo "Versión disponible: ${remote_id}"
+
+    if [[ -n "$local_id" && "$local_id" == "$remote_id" ]]; then
+        echo "Ya estás en la última versión. No hace falta actualizar."
+        return 0
+    fi
+
+    read -rp "Hay una actualización disponible. ¿Aplicarla ahora? [s/N] " resp
+    case "$resp" in
+        [sS]|[sS][iI])
+            echo "Generando backup antes de actualizar..."
+            do_backup
+            systemctl stop "$SERVICE_NAME"
+            echo "Actualizando servidor, esto puede tardar unos minutos..."
+            su - valheim -c "steamcmd +force_install_dir ${INSTALL_DIR} +login anonymous +app_update ${STEAM_APPID} validate +quit"
+            systemctl start "$SERVICE_NAME"
+            echo "Actualización completa y servidor reiniciado."
+            ;;
+        *)
+            echo "Actualización cancelada, no se modificó nada."
+            ;;
+    esac
+}
+
+cmd_backups_list() {
+    echo "Backups de vhctl en ${BACKUP_DIR} (se conservan los últimos ${RETENTION}):"
+    if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
+        echo "Todavía no hay backups generados."
+        return 0
+    fi
+    for f in $(ls -1t "${BACKUP_DIR}"/*.tar.gz 2>/dev/null); do
+        local size
+        size=$(du -h "$f" | cut -f1)
+        echo "$(basename "$f")  —  ${size}"
+    done
+}
+
+cmd_password() {
+    require_root
+    local new_pass="${1:-}"
+    if [[ -z "$new_pass" ]]; then
+        echo "Uso: vhctl password <nueva_contraseña>" >&2
+        exit 1
+    fi
+    if (( ${#new_pass} < 5 )); then
+        echo "La contraseña debe tener al menos 5 caracteres (mínimo que exige Valheim)." >&2
+        exit 1
+    fi
+    if [[ ! -f "$PASSWORD_FILE" ]]; then
+        echo "No se encontró $PASSWORD_FILE" >&2
+        exit 1
+    fi
+
+    if grep -q '^VALHEIM_PASSWORD=' "$PASSWORD_FILE"; then
+        sed -i "s|^VALHEIM_PASSWORD=.*|VALHEIM_PASSWORD=${new_pass}|" "$PASSWORD_FILE"
+    else
+        echo "VALHEIM_PASSWORD=${new_pass}" >> "$PASSWORD_FILE"
+    fi
+    chmod 600 "$PASSWORD_FILE"
+    chown root:root "$PASSWORD_FILE"
+    echo "Contraseña actualizada en ${PASSWORD_FILE}."
+
+    read -rp "¿Reiniciar el servidor ahora para aplicar el cambio? [s/N] " resp
+    case "$resp" in
+        [sS]|[sS][iI])
+            echo "Generando backup antes de reiniciar..."
+            do_backup
+            systemctl restart "$SERVICE_NAME"
+            echo "Servidor reiniciado con la nueva contraseña."
+            ;;
+        *)
+            echo "No se reinició. La contraseña nueva recién se aplica con 'sudo vhctl reset' o 'sudo vhctl off && sudo vhctl on'."
+            ;;
+    esac
+}
+
+case "${1:-}" in
+    on) cmd_on ;;
+    off) cmd_off ;;
+    reset) cmd_reset ;;
+    status) cmd_status ;;
+    backup) do_backup ;;
+    backups) cmd_backups_list ;;
+    update) cmd_update ;;
+    password) cmd_password "${2:-}" ;;
+    worlds)
+        case "${2:-}" in
+            list) cmd_worlds_list ;;
+            create) cmd_worlds_create "${3:-}" ;;
+            switch) cmd_worlds_switch "${3:-}" ;;
+            delete) cmd_worlds_delete "${3:-}" "${4:-}" ;;
+            *) echo "Uso: vhctl worlds {list|create <nombre>|switch <nombre>|delete <nombre> --confirm}" >&2; exit 1 ;;
+        esac
+        ;;
+    *)
+        echo "Uso: vhctl {on|off|reset|status|backup|backups|update|password|worlds ...}" >&2
+        exit 1
+        ;;
+esac
