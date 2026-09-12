@@ -5,7 +5,19 @@ SERVICE_NAME="valheim"
 START_SCRIPT="/opt/valheim-server/start_valheim.sh"
 WORLD_DIR="/srv/valheim/worlds/worlds_local"
 BACKUP_DIR="/srv/valheim/worlds/vhctl_backups"
+MODIFIERS_DIR="/srv/valheim/worlds/modifiers"
 RETENTION=5
+
+declare -A VALID_MODIFIERS=(
+    [combat]="veryeasy easy normal hard veryhard"
+    [deathpenalty]="casual veryeasy easy normal hard hardcore"
+    [resources]="muchless less normal more muchmore most"
+    [raids]="none muchless less normal more muchmore"
+    [portals]="casual normal hard veryhard"
+    [playerevents]="true false"
+    [passivemobs]="true false"
+    [nobuildcost]="true false"
+)
 
 require_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -101,11 +113,82 @@ cmd_worlds_list() {
     echo "Mundo activo actualmente: $(get_world_name)"
 }
 
+cmd_worlds_modifiers() {
+    local name="$1"
+    shift || true
+    if [[ -z "$name" ]]; then
+        echo "Uso: vhctl worlds modifiers <nombre> [set clave=valor ...]" >&2
+        exit 1
+    fi
+    mkdir -p "$MODIFIERS_DIR"
+    local file="${MODIFIERS_DIR}/${name}.conf"
+
+    if [[ "${1:-}" == "set" ]]; then
+        require_root
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "Uso: vhctl worlds modifiers <nombre> set clave=valor [clave=valor ...]" >&2
+            exit 1
+        fi
+        touch "$file"
+        for pair in "$@"; do
+            local key="${pair%%=*}"
+            local value="${pair#*=}"
+            if [[ -z "${VALID_MODIFIERS[$key]:-}" ]]; then
+                echo "Modificador desconocido: '$key'. Válidos: ${!VALID_MODIFIERS[*]}" >&2
+                exit 1
+            fi
+            if [[ ! " ${VALID_MODIFIERS[$key]} " == *" ${value} "* ]]; then
+                echo "Valor inválido para '$key': '$value'. Válidos: ${VALID_MODIFIERS[$key]}" >&2
+                exit 1
+            fi
+            if grep -q "^${key}=" "$file" 2>/dev/null; then
+                sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+            else
+                echo "${key}=${value}" >> "$file"
+            fi
+            echo "Modificador '${key}' = '${value}' guardado para '${name}'."
+        done
+        chown valheim:valheim "$file"
+
+        if world_exists "$name"; then
+            local active_world
+            active_world=$(get_world_name)
+            if [[ "$name" == "$active_world" ]]; then
+                read -rp "¿Reiniciar el servidor ahora para aplicar los modificadores? [s/N] " resp
+                case "$resp" in
+                    [sS]|[sS][iI])
+                        echo "Generando backup antes de reiniciar..."
+                        do_backup
+                        systemctl restart "$SERVICE_NAME"
+                        echo "Servidor reiniciado con los modificadores aplicados."
+                        ;;
+                    *)
+                        echo "No se reinició. Se van a aplicar la próxima vez que reinicies con 'vhctl reset'."
+                        ;;
+                esac
+            else
+                echo "Guardado. Se va a aplicar la próxima vez que '$name' esté activo y el servidor se reinicie."
+            fi
+        else
+            echo "Se van a aplicar cuando generes '$name' por primera vez con 'vhctl on'."
+        fi
+    else
+        if [[ ! -s "$file" ]]; then
+            echo "No hay modificadores configurados para '$name' (usa los valores por defecto de Valheim)."
+            return 0
+        fi
+        echo "Modificadores configurados para '$name':"
+        cat "$file"
+    fi
+}
+
 cmd_worlds_create() {
     require_root
     local name="$1"
+    shift || true
     if [[ -z "$name" ]]; then
-        echo "Uso: vhctl worlds create <nombre>" >&2
+        echo "Uso: vhctl worlds create <nombre> [clave=valor ...]" >&2
         exit 1
     fi
     if world_exists "$name"; then
@@ -114,6 +197,9 @@ cmd_worlds_create() {
     fi
     set_world_name "$name"
     echo "Mundo '$name' configurado. Se generará al iniciar el servidor."
+    if [[ $# -gt 0 ]]; then
+        cmd_worlds_modifiers "$name" set "$@"
+    fi
     echo "Ejecutá 'vhctl on' o 'vhctl reset' para crearlo."
 }
 
@@ -247,6 +333,17 @@ cmd_backups_list() {
     echo "Espacio total ocupado: $(du -sh "$BACKUP_DIR" | cut -f1)"
 }
 
+MONITOR_LOG="/var/log/valheim-monitor.log"
+
+cmd_monitor() {
+    if [[ ! -f "$MONITOR_LOG" ]]; then
+        echo "Todavía no hay registros de monitoreo (el healthcheck corre cada 5 min vía cron)."
+        return 0
+    fi
+    echo "Últimos cambios de estado registrados:"
+    tail -n 30 "$MONITOR_LOG"
+}
+
 cmd_help() {
     cat <<'EOF'
 vhctl — administración del servidor Valheim
@@ -262,13 +359,16 @@ Comandos generales:
   backups                            Lista los backups guardados (nombre, tamaño y total)
   update                             Consulta y aplica actualizaciones del juego
   password <nueva_contraseña>        Cambia la contraseña del mundo
+  monitor                            Muestra el historial de caídas/recuperaciones detectadas
   help                                Muestra esta ayuda
 
 Comandos de mundos:
   worlds list                        Lista los mundos disponibles
-  worlds create <nombre>             Crea un mundo nuevo
+  worlds create <nombre> [k=v ...]   Crea un mundo nuevo (con modificadores opcionales)
   worlds switch <nombre>             Cambia el mundo activo (con backup previo)
   worlds delete <nombre> --confirm   Borra un mundo (no permite borrar el activo)
+  worlds modifiers <nombre>          Muestra los modificadores configurados
+  worlds modifiers <nombre> set k=v  Configura modificadores (aplican con un reinicio)
 EOF
 }
 
@@ -320,14 +420,16 @@ case "${1:-}" in
     backups) cmd_backups_list ;;
     update) cmd_update ;;
     password) cmd_password "${2:-}" ;;
+    monitor) cmd_monitor ;;
     help|--help|-h) cmd_help ;;
     worlds)
         case "${2:-}" in
             list) cmd_worlds_list ;;
-            create) cmd_worlds_create "${3:-}" ;;
+            create) cmd_worlds_create "${3:-}" "${@:4}" ;;
             switch) cmd_worlds_switch "${3:-}" ;;
             delete) cmd_worlds_delete "${3:-}" "${4:-}" ;;
-            *) echo "Uso: vhctl worlds {list|create <nombre>|switch <nombre>|delete <nombre> --confirm}" >&2; exit 1 ;;
+            modifiers) cmd_worlds_modifiers "${3:-}" "${@:4}" ;;
+            *) echo "Uso: vhctl worlds {list|create <nombre> [clave=valor ...]|switch <nombre>|delete <nombre> --confirm|modifiers <nombre> [set clave=valor ...]}" >&2; exit 1 ;;
         esac
         ;;
     *)
