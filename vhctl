@@ -344,6 +344,34 @@ cmd_monitor() {
     tail -n 30 "$MONITOR_LOG"
 }
 
+PLAYERS_QUERY_SCRIPT="/usr/local/bin/valheim-players-query.py"
+PLAYERS_STATE_FILE="/var/lib/valheim/players-lastseen.json"
+
+cmd_players() {
+    if [[ "${1:-}" == "last" ]]; then
+        if [[ ! -f "$PLAYERS_STATE_FILE" ]]; then
+            echo "Todavía no hay registros de último acceso (el tracker corre cada 5 min vía cron)."
+            return 0
+        fi
+        python3 - "$PLAYERS_STATE_FILE" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+
+for name, ts in sorted(data.items(), key=lambda x: x[1], reverse=True):
+    print(f"{ts}  -  {name}")
+PYEOF
+    else
+        if [[ ! -f "$PLAYERS_QUERY_SCRIPT" ]]; then
+            echo "El script de consulta de jugadores no está instalado (${PLAYERS_QUERY_SCRIPT})." >&2
+            exit 1
+        fi
+        python3 "$PLAYERS_QUERY_SCRIPT"
+    fi
+}
+
 cmd_help() {
     cat <<'EOF'
 vhctl — administración del servidor Valheim
@@ -360,6 +388,8 @@ Comandos generales:
   update                             Consulta y aplica actualizaciones del juego
   password <nueva_contraseña>        Cambia la contraseña del mundo
   monitor                            Muestra el historial de caídas/recuperaciones detectadas
+  players                            Jugadores conectados ahora mismo
+  players last                       Último acceso registrado de cada jugador
   help                                Muestra esta ayuda
 
 Comandos de mundos:
@@ -421,6 +451,7 @@ case "${1:-}" in
     update) cmd_update ;;
     password) cmd_password "${2:-}" ;;
     monitor) cmd_monitor ;;
+    players) cmd_players "${2:-}" ;;
     help|--help|-h) cmd_help ;;
     worlds)
         case "${2:-}" in
