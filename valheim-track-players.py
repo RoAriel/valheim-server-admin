@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-import a2s
 import json
 import os
+import re
+import subprocess
 from datetime import datetime
 
-ADDRESS = ("127.0.0.1", 2457)
 STATE_FILE = "/var/lib/valheim/players-lastseen.json"
+PATTERN = re.compile(r"Got character ZDOID from (.+?) :")
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -22,16 +23,23 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 def main():
+    # Ventana de 6 min para no perder actividad entre corridas del cron (cada 5 min)
     try:
-        players = a2s.players(ADDRESS, timeout=3)
+        result = subprocess.run(
+            ["journalctl", "-u", "valheim", "--since", "6 min ago", "--no-pager", "-o", "cat"],
+            capture_output=True, text=True, timeout=10,
+        )
     except Exception:
-        return  # servidor caído o sin responder: no se actualiza nada, se reintenta en 5 min
+        return
+
+    names = set(PATTERN.findall(result.stdout))
+    if not names:
+        return
 
     state = load_state()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for p in players:
-        if p.name:
-            state[p.name] = now
+    for name in names:
+        state[name] = now
     save_state(state)
 
 if __name__ == "__main__":

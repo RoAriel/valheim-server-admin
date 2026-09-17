@@ -368,6 +368,7 @@ PYEOF
             echo "El script de consulta de jugadores no está instalado (${PLAYERS_QUERY_SCRIPT})." >&2
             exit 1
         fi
+        echo "Mundo activo: $(get_world_name)"
         python3 "$PLAYERS_QUERY_SCRIPT"
     fi
 }
