@@ -1,6 +1,10 @@
 #!/bin/bash
+# vhctl — herramienta de administración del servidor dedicado de Valheim (mustachent.baires.host)
+# Historial de cambios versionado en /srv/valheim/config-backup (git local, sin remoto).
+# Ver guia-servidor-valheim.md para el detalle de cada comando y el porqué de cada decisión.
 set -euo pipefail
 
+# --- Configuración general -------------------------------------------------
 SERVICE_NAME="valheim"
 START_SCRIPT="/opt/valheim-server/start_valheim.sh"
 WORLD_DIR="/srv/valheim/worlds/worlds_local"
@@ -8,6 +12,8 @@ BACKUP_DIR="/srv/valheim/worlds/vhctl_backups"
 MODIFIERS_DIR="/srv/valheim/worlds/modifiers"
 RETENTION=5
 
+# Modificadores de mundo soportados por Valheim y sus valores válidos.
+# Se usan para validar "vhctl worlds modifiers ... set clave=valor" antes de guardar nada.
 declare -A VALID_MODIFIERS=(
     [combat]="veryeasy easy normal hard veryhard"
     [deathpenalty]="casual veryeasy easy normal hard hardcore"
@@ -19,6 +25,9 @@ declare -A VALID_MODIFIERS=(
     [nobuildcost]="true false"
 )
 
+# --- Funciones internas ------------------------------------------------------
+
+# Corta la ejecución si el comando no se llamó con sudo/root.
 require_root() {
     if [[ $EUID -ne 0 ]]; then
         echo "Este comando necesita sudo/root." >&2
@@ -26,20 +35,29 @@ require_root() {
     fi
 }
 
+# Lee el nombre del mundo activo directamente de start_valheim.sh (fuente de verdad real,
+# no confiar en lo que reporten otras consultas como la de Steam — ver cmd_players).
 get_world_name() {
     grep -oP '^WORLD_NAME="\K[^"]+' "$START_SCRIPT"
 }
 
+# Reemplaza el WORLD_NAME en start_valheim.sh. No reinicia el servicio por su cuenta;
+# quien la llama decide cuándo aplicar el cambio.
 set_world_name() {
     local new_name="$1"
     sed -i "s/^WORLD_NAME=\".*\"/WORLD_NAME=\"${new_name}\"/" "$START_SCRIPT"
 }
 
+# Verdadero si existe un mundo con ese nombre, en cualquiera de los dos formatos:
+# carpeta (Valheim 1.0+) o archivos .db/.fwl sueltos (formato clásico, mundos viejos).
 world_exists() {
     local name="$1"
     [[ -d "${WORLD_DIR}/${name}" || -f "${WORLD_DIR}/${name}.db" ]]
 }
 
+# Genera un backup comprimido del mundo activo en $BACKUP_DIR, detectando el formato
+# automáticamente, y rota los backups viejos dejando solo los últimos $RETENTION.
+# La llaman on-demand (vhctl backup) y automáticamente antes de off/reset/update/switch/delete.
 do_backup() {
     require_root
     local world_name
@@ -73,6 +91,8 @@ do_backup() {
     fi
 }
 
+# --- Comandos generales ------------------------------------------------------
+
 cmd_on() {
     require_root
     systemctl start "$SERVICE_NAME"
@@ -95,6 +115,8 @@ cmd_reset() {
     echo "Servidor reiniciado."
 }
 
+# Muestra el estado del servicio con la contraseña enmascarada (systemctl status expone
+# el argumento -password en texto plano tal cual quedó en la línea de comandos del proceso).
 cmd_status() {
     systemctl status "$SERVICE_NAME" --no-pager -l \
         | sed -E 's/(-password )[^[:space:]]+/\1********/' \
@@ -103,6 +125,10 @@ cmd_status() {
     echo "Mundo activo: $(get_world_name)"
 }
 
+# --- Comandos de mundos -------------------------------------------------------
+
+# Lista los mundos guardados, combinando ambos formatos (carpeta / .db suelto) y
+# excluyendo las carpetas de backup automático nativas de Valheim (*_backup_auto-*).
 cmd_worlds_list() {
     echo "Mundos disponibles en $WORLD_DIR:"
     {
@@ -113,6 +139,10 @@ cmd_worlds_list() {
     echo "Mundo activo actualmente: $(get_world_name)"
 }
 
+# Ver o configurar los modificadores de un mundo (dificultad, recursos, invasiones, etc.).
+# A diferencia del seed (fijo desde la generación), estos son reglas de runtime: Valheim
+# los vuelve a leer en cada arranque, así que aplican con un simple reinicio, incluso a
+# mundos que ya existen hace rato. Confirmado empíricamente (ver changelog de la guía).
 cmd_worlds_modifiers() {
     local name="$1"
     shift || true
@@ -131,6 +161,7 @@ cmd_worlds_modifiers() {
             exit 1
         fi
         touch "$file"
+        # Validar y guardar cada par clave=valor contra VALID_MODIFIERS antes de tocar el archivo.
         for pair in "$@"; do
             local key="${pair%%=*}"
             local value="${pair#*=}"
@@ -151,6 +182,7 @@ cmd_worlds_modifiers() {
         done
         chown valheim:valheim "$file"
 
+        # Si el mundo ya existe y está activo, ofrecer reiniciar ya mismo para aplicar el cambio.
         if world_exists "$name"; then
             local active_world
             active_world=$(get_world_name)
@@ -174,6 +206,7 @@ cmd_worlds_modifiers() {
             echo "Se van a aplicar cuando generes '$name' por primera vez con 'vhctl on'."
         fi
     else
+        # Sin "set": solo mostrar los modificadores guardados para ese mundo.
         if [[ ! -s "$file" ]]; then
             echo "No hay modificadores configurados para '$name' (usa los valores por defecto de Valheim)."
             return 0
@@ -183,6 +216,8 @@ cmd_worlds_modifiers() {
     fi
 }
 
+# Configura un mundo nuevo (no lo genera todavía — eso pasa recién con el próximo
+# "vhctl on"/"vhctl reset"). Acepta modificadores opcionales en el mismo comando.
 cmd_worlds_create() {
     require_root
     local name="$1"
@@ -203,6 +238,7 @@ cmd_worlds_create() {
     echo "Ejecutá 'vhctl on' o 'vhctl reset' para crearlo."
 }
 
+# Cambia el mundo activo a uno ya existente, con backup del mundo saliente antes de cambiar.
 cmd_worlds_switch() {
     require_root
     local name="$1"
@@ -221,6 +257,8 @@ cmd_worlds_switch() {
     echo "Cambiado al mundo '$name' y servidor reiniciado."
 }
 
+# Borra un mundo (no el activo — hay que cambiar de mundo primero), guardando un backup
+# de seguridad justo antes de borrar, por si hace falta recuperarlo después.
 cmd_worlds_delete() {
     require_root
     local name="$1"
@@ -262,11 +300,14 @@ cmd_worlds_delete() {
     echo "Mundo '$name' borrado. Se guardó un backup de seguridad en $BACKUP_DIR por si te arrepentís."
 }
 
+# --- Actualización del juego --------------------------------------------------
+
 STEAM_APPID=896660
 INSTALL_DIR="/opt/valheim-server"
 MANIFEST_FILE="${INSTALL_DIR}/steamapps/appmanifest_${STEAM_APPID}.acf"
 PASSWORD_FILE="/etc/valheim-server.env"
 
+# Versión (buildid) instalada actualmente, leída del manifiesto que genera SteamCMD.
 get_local_buildid() {
     if [[ -f "$MANIFEST_FILE" ]]; then
         grep -oP '"buildid"\s*"\K[0-9]+' "$MANIFEST_FILE" 2>/dev/null | head -1 || true
@@ -274,6 +315,7 @@ get_local_buildid() {
     return 0
 }
 
+# Versión (buildid) disponible en Steam para la rama "public", sin descargar nada todavía.
 get_remote_buildid() {
     su - valheim -c "steamcmd +login anonymous +app_info_update 1 +app_info_print ${STEAM_APPID} +quit" 2>/dev/null \
         | awk '/"public"/{f=1} f && /"buildid"/{print; exit}' \
@@ -281,6 +323,8 @@ get_remote_buildid() {
     return 0
 }
 
+# Compara versión local vs remota y, si hay diferencia, pregunta antes de aplicar el
+# update (con backup y parada/arranque del servicio incluidos).
 cmd_update() {
     require_root
     echo "Consultando la última versión disponible en Steam..."
@@ -318,6 +362,8 @@ cmd_update() {
     esac
 }
 
+# --- Backups (listado) --------------------------------------------------------
+
 cmd_backups_list() {
     echo "Backups de vhctl en ${BACKUP_DIR} (se conservan los últimos ${RETENTION}):"
     if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
@@ -333,6 +379,10 @@ cmd_backups_list() {
     echo "Espacio total ocupado: $(du -sh "$BACKUP_DIR" | cut -f1)"
 }
 
+# --- Monitorización ------------------------------------------------------------
+
+# El log lo escribe /usr/local/bin/valheim-healthcheck.sh (cron cada 5 min), solo cuando
+# cambia el estado del servicio (UP/DOWN) — no es un log continuo, es un historial de incidentes.
 MONITOR_LOG="/var/log/valheim-monitor.log"
 
 cmd_monitor() {
@@ -344,6 +394,14 @@ cmd_monitor() {
     tail -n 30 "$MONITOR_LOG"
 }
 
+# --- Jugadores conectados y último acceso --------------------------------------
+
+# PLAYERS_QUERY_SCRIPT usa a2s.info() (Steam query, puerto 2457) para el conteo en vivo,
+# que sí es confiable. Valheim NO implementa A2S_PLAYER, así que no hay forma de pedirle
+# nombres individuales por esa vía — por eso los nombres y la actividad reciente salen
+# de PLAYERS_STATE_FILE, que arma /usr/local/bin/valheim-track-players.py (cron cada 5 min)
+# leyendo las líneas "Got character ZDOID from <nombre> :" del log (se dispara al conectarse
+# y también al reaparecer tras morir; para "¿está activo?" nos alcanza con cualquiera de los dos).
 PLAYERS_QUERY_SCRIPT="/usr/local/bin/valheim-players-query.py"
 PLAYERS_STATE_FILE="/var/lib/valheim/players-lastseen.json"
 
@@ -353,6 +411,7 @@ cmd_players() {
             echo "Todavía no hay registros de último acceso (el tracker corre cada 5 min vía cron)."
             return 0
         fi
+        # Lee el JSON de último-visto y lo imprime ordenado del más reciente al más viejo.
         python3 - "$PLAYERS_STATE_FILE" <<'PYEOF'
 import json
 import sys
@@ -368,10 +427,14 @@ PYEOF
             echo "El script de consulta de jugadores no está instalado (${PLAYERS_QUERY_SCRIPT})." >&2
             exit 1
         fi
+        # El mundo se muestra desde get_world_name (fuente real), no desde el campo "map"
+        # de la consulta Steam: Valheim devuelve ahí el nombre del servidor, no el del mundo.
         echo "Mundo activo: $(get_world_name)"
         python3 "$PLAYERS_QUERY_SCRIPT"
     fi
 }
+
+# --- Ayuda -----------------------------------------------------------------
 
 cmd_help() {
     cat <<'EOF'
@@ -391,6 +454,7 @@ Comandos generales:
   monitor                            Muestra el historial de caídas/recuperaciones detectadas
   players                            Jugadores conectados ahora mismo
   players last                       Último acceso registrado de cada jugador
+  gitsync [mensaje]                  Versiona vhctl y compañía en git (copia + commit)
   help                                Muestra esta ayuda
 
 Comandos de mundos:
@@ -403,6 +467,10 @@ Comandos de mundos:
 EOF
 }
 
+# --- Contraseña del mundo ----------------------------------------------------
+
+# Cambia VALHEIM_PASSWORD en /etc/valheim-server.env (nunca en el script de arranque),
+# manteniendo permisos 600/root:root, y ofrece reiniciar ya mismo para aplicar el cambio.
 cmd_password() {
     require_root
     local new_pass="${1:-}"
@@ -442,6 +510,85 @@ cmd_password() {
     esac
 }
 
+# --- Versionado de configuración (git) ------------------------------------
+
+# Repo local (sin remoto todavía) donde vive el historial de config, armado en el
+# paso 22 de la guía. CONFIG_FILES mapea cada archivo real del sistema a su nombre
+# dentro del repo — agregar una fuente nueva acá es lo único que hace falta cuando
+# sumamos un script más a la administración del server.
+CONFIG_BACKUP_DIR="/srv/valheim/config-backup"
+declare -A CONFIG_FILES=(
+    ["/usr/local/bin/vhctl"]="vhctl"
+    ["/opt/valheim-server/start_valheim.sh"]="start_valheim.sh"
+    ["/etc/systemd/system/valheim.service"]="valheim.service"
+    ["/etc/sudoers.d/vhctl"]="sudoers-vhctl"
+    ["/usr/local/bin/valheim-healthcheck.sh"]="valheim-healthcheck.sh"
+    ["/usr/local/bin/valheim-players-query.py"]="valheim-players-query.py"
+    ["/usr/local/bin/valheim-track-players.py"]="valheim-track-players.py"
+)
+# Nota: /etc/valheim-server.env (la contraseña real) queda afuera a propósito —
+# no se versiona nunca. Ver valheim-server.env.example dentro del repo.
+
+# Copia todos los archivos de CONFIG_FILES + la carpeta de modificadores + el
+# crontab de root al repo, y commitea si hubo cambios. Reemplaza la secuencia
+# manual de "cp + git add + git commit" que se repetía a mano en cada edición.
+cmd_gitsync() {
+    require_root
+    if [[ ! -d "${CONFIG_BACKUP_DIR}/.git" ]]; then
+        echo "No hay un repo git en ${CONFIG_BACKUP_DIR}. Corré 'git init' ahí primero (paso 22 de la guía)." >&2
+        exit 1
+    fi
+
+    # .gitignore de seguridad: nunca de más antes de tener un remoto en GitHub.
+    if [[ ! -f "${CONFIG_BACKUP_DIR}/.gitignore" ]]; then
+        cat > "${CONFIG_BACKUP_DIR}/.gitignore" <<'EOF'
+*.env
+*secret*
+*password*
+*.key
+*.pem
+EOF
+        echo "Se creó .gitignore de seguridad en ${CONFIG_BACKUP_DIR}."
+    fi
+
+    local copied=0
+    for src in "${!CONFIG_FILES[@]}"; do
+        if [[ -f "$src" ]]; then
+            cp "$src" "${CONFIG_BACKUP_DIR}/${CONFIG_FILES[$src]}"
+            copied=$((copied + 1))
+        else
+            echo "Aviso: no se encontró '$src', se omite." >&2
+        fi
+    done
+
+    if [[ -d "$MODIFIERS_DIR" ]]; then
+        rm -rf "${CONFIG_BACKUP_DIR}/modifiers"
+        cp -r "$MODIFIERS_DIR" "${CONFIG_BACKUP_DIR}/modifiers"
+    fi
+
+    # Referencia informativa del cron actual (no se ejecuta desde acá, solo queda documentado).
+    crontab -l > "${CONFIG_BACKUP_DIR}/crontab-root.txt" 2>/dev/null || true
+
+    echo "Copiados ${copied} archivo(s) a ${CONFIG_BACKUP_DIR}."
+
+    cd "$CONFIG_BACKUP_DIR"
+    git add .
+
+    if git diff --cached --quiet; then
+        echo "Sin cambios: el repo ya estaba al día."
+        return 0
+    fi
+
+    echo "Cambios detectados:"
+    git diff --cached --stat
+
+    local msg="${1:-Actualización automática ($(date '+%Y-%m-%d %H:%M:%S'))}"
+    git commit -m "$msg" --quiet
+    echo "Commit creado: ${msg}"
+}
+
+# --- Dispatcher principal ------------------------------------------------------
+
 case "${1:-}" in
     on) cmd_on ;;
     off) cmd_off ;;
@@ -453,6 +600,7 @@ case "${1:-}" in
     password) cmd_password "${2:-}" ;;
     monitor) cmd_monitor ;;
     players) cmd_players "${2:-}" ;;
+    gitsync) cmd_gitsync "${2:-}" ;;
     help|--help|-h) cmd_help ;;
     worlds)
         case "${2:-}" in
