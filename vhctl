@@ -585,6 +585,19 @@ EOF
     local msg="${1:-Actualización automática ($(date '+%Y-%m-%d %H:%M:%S'))}"
     git commit -m "$msg" --quiet
     echo "Commit creado: ${msg}"
+
+    # Push automático al remoto, si hay uno configurado (ver paso 22 de la guía).
+    # No es un error fatal si todavía no hay remoto, o si el push falla por red:
+    # el commit ya quedó guardado localmente de todos modos.
+    if git remote get-url origin &>/dev/null; then
+        if git push origin HEAD 2>/tmp/vhctl_push_error.log; then
+            echo "Cambios subidos a GitHub (origin)."
+        else
+            echo "Aviso: el commit se guardó localmente, pero el push a GitHub falló. Detalle:" >&2
+            cat /tmp/vhctl_push_error.log >&2
+        fi
+        rm -f /tmp/vhctl_push_error.log
+    fi
 }
 
 # --- Dispatcher principal ------------------------------------------------------
