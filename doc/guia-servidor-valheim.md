@@ -4,7 +4,7 @@
 
 Guía paso a paso para levantar, asegurar y administrar un servidor dedicado de Valheim en una VPS Ubuntu, incluyendo la herramienta de administración `vhctl` construida a lo largo del proceso.
 
-> 🗓️ **Última revisión**: incluye la corrección del bug de `-crossplay`, soporte de modificadores de mundo (con la corrección de que sí aplican a mundos existentes con un reinicio), versionado con git local, y monitorización básica. El script `vhctl` completo vive en [`vhctl.sh`](./vhctl.sh) — esta guía referencia ese archivo en vez de repetirlo entero en cada paso.
+> 🗓️ **Última revisión**: incluye la corrección del bug de `-crossplay`, soporte de modificadores de mundo (con la corrección de que sí aplican a mundos existentes con un reinicio), versionado con git local, y monitorización básica. El script `vhctl` completo vive en [`vhctl.sh`](../vhctl) — esta guía referencia ese archivo en vez de repetirlo entero en cada paso.
 
 ## 📑 Índice
 
@@ -485,7 +485,7 @@ rm -rf /tmp/valheim_test_restore
 
 Para simplificar la operación diaria (encender/apagar/reiniciar, backups, manejo de mundos, modificadores, monitoreo), se construyó un script wrapper sobre `systemctl` y las rutas del servidor. Fue creciendo por partes a lo largo de este proyecto; la versión final quedó en 439 líneas.
 
-> 📄 **Archivo completo**: ver [`vhctl.sh`](./vhctl.sh). Estructura general del script:
+> 📄 **Archivo completo**: ver [`vhctl.sh`](../vhctl.sh). Estructura general del script:
 > - Variables globales y mapa de modificadores válidos (`VALID_MODIFIERS`)
 > - Funciones internas: `require_root`, `get_world_name`, `set_world_name`, `world_exists`, `do_backup`
 > - Comandos generales: `cmd_on`, `cmd_off`, `cmd_reset`, `cmd_status`, `cmd_update`, `cmd_password`, `cmd_monitor`, `cmd_players`, `cmd_gitsync`, `cmd_help`
@@ -496,7 +496,7 @@ Para simplificar la operación diaria (encender/apagar/reiniciar, backups, manej
 ```bash
 nano /usr/local/bin/vhctl
 ```
-Pegar el contenido completo de [`vhctl.sh`](./vhctl.sh).
+Pegar el contenido completo de [`vhctl.sh`](../vhctl.sh).
 
 ### Permisos y verificación
 ```bash
@@ -783,7 +783,7 @@ python3 -c "import a2s; print('OK')"
 
 ### Instalar los scripts
 
-> 📄 **Archivos completos**: ver [`valheim-players-query.py`](./valheim-players-query.py) y [`valheim-track-players.py`](./valheim-track-players.py).
+> 📄 **Archivos completos**: ver [`valheim-players-query.py`](../valheim-players-query.py) y [`valheim-track-players.py`](../valheim-track-players.py).
 >
 > - `valheim-players-query.py`: consulta `a2s.info()` para el conteo en vivo, y lee el archivo de estado para mostrar nombres con actividad en los últimos 10 minutos.
 > - `valheim-track-players.py`: pensado para correr por cron cada 5 minutos. Revisa los últimos 6 minutos del log (`journalctl -u valheim --since "6 min ago"`), extrae los nombres de las líneas `Got character ZDOID from`, y actualiza `/var/lib/valheim/players-lastseen.json` con la hora de la última vez que se vio a cada uno.

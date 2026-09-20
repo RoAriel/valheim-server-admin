@@ -1,4 +1,4 @@
-[![valheim-banner.png](https://i.postimg.cc/ht4S1m96/valheim-banner.png)](https://postimg.cc/mtqfbtpy)
+![valheim-banner.png](https://i.postimg.cc/ht4S1m96/valheim-banner.png)
 
 # ⚔️ Guía rápida — Server de Valheim ⚔️
 
@@ -18,7 +18,7 @@
 
 | Dato | Valor |
 |---|---|
-| 🌐 IP del server | `23.175.40.29` |
+| 🌐 IP del server | `xx.xxx.xx.xx` |
 | 🔌 Puerto | `2456` |
 | 🏰 Nombre del server | Buscalo en el browser de servidores de Steam, o agregalo por IP directo |
 | 🔒 Contraseña del mundo | Pedísela a quien te pasó esta guía |
@@ -30,7 +30,7 @@
 ## 🚢 Conectarse por SSH (para administrar)
 
 ```bash
-ssh valheim@23.175.40.29
+ssh valheim@xx.xxx.xx.xx
 ```
 
 🔑 *Pedile la contraseña o la clave SSH a quien te pasó esta guía.*
